@@ -1,0 +1,11 @@
+[project]
+name = "verse-splitter-ai"
+version = "0.1.0"
+description = "AI-powered Quran recitation marker generator for page and verse boundaries"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "mutagen>=1.47.0",
+    "python-levenshtein>=0.27.3",
+]
