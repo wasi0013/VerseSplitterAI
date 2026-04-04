@@ -4,12 +4,18 @@
 Usage:
     python tag_mp3s.py <reciter_folder> [--reciter NAME] [--cover PATH] [--album NAME] [--dry-run]
 
+Supports two filename patterns:
+  - Surah-based:  001.mp3 … 114.mp3
+  - Page-based:   page<NNN>-<SSS><PPP>.mp3  (page, surah, part)
+
 Examples:
     python tag_mp3s.py recitations/alafasy --reciter "Mishary Rashid Alafasy" --cover resources/1ayah-logo.png
+    python tag_mp3s.py docs/examples/page_by_page/alafasy --reciter "Mishary Rashid Alafasy" --cover resources/1ayah-logo.png
     python tag_mp3s.py recitations/luhaidan --reciter "Salman Al-Utaybi"
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -61,6 +67,15 @@ SURAH_NAMES = {
 # Pattern: 001.mp3 … 114.mp3
 FILENAME_RE = re.compile(r"^(\d{3})\.mp3$")
 
+# Pattern: page001-001000.mp3 (page<page>-<surah><part>.mp3)
+PAGE_FILENAME_RE = re.compile(r"^page(\d{3})-(\d{3})(\d{3})\.mp3$")
+
+
+def load_quran_data(quran_json_path: Path) -> dict:
+    """Load quran.json and return a dict keyed by chapter number."""
+    with open(quran_json_path) as f:
+        return json.load(f)
+
 
 def parse_filename(filename: str) -> int | None:
     """Extract surah number from filename like 001.mp3."""
@@ -68,6 +83,88 @@ def parse_filename(filename: str) -> int | None:
     if not m:
         return None
     return int(m.group(1))
+
+
+def parse_page_filename(filename: str) -> tuple[int, int, int] | None:
+    """Extract page, surah, and part from filename like page321-020009.mp3."""
+    m = PAGE_FILENAME_RE.match(filename)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def tag_page_mp3s(
+    mp3_folder: Path,
+    reciter: str,
+    cover_path: Path | None,
+    album: str,
+    quran_json_path: Path,
+    dry_run: bool = False,
+) -> None:
+    quran_data = load_quran_data(quran_json_path)
+
+    cover_data = None
+    mime = "image/png"
+    if cover_path and cover_path.exists():
+        mime = "image/png" if cover_path.suffix.lower() == ".png" else "image/jpeg"
+        cover_data = cover_path.read_bytes()
+        print(f"Using cover art: {cover_path} ({mime})")
+    elif cover_path:
+        print(f"Warning: cover file not found: {cover_path}", file=sys.stderr)
+
+    mp3_files = sorted(mp3_folder.glob("page*.mp3"))
+    if not mp3_files:
+        print(f"No page MP3 files found in {mp3_folder}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Found {len(mp3_files)} page MP3 files in {mp3_folder}")
+
+    for mp3_file in mp3_files:
+        parsed = parse_page_filename(mp3_file.name)
+        if parsed is None:
+            print(f"  Skipping (unrecognized filename): {mp3_file.name}")
+            continue
+
+        page, surah, part = parsed
+        surah_name = SURAH_NAMES.get(surah, f"Surah {surah}")
+        title = f"{page:03d} {surah:03d} {surah_name}"
+        track_num = str(page)
+
+        if dry_run:
+            print(f"  [DRY RUN] {mp3_file.name} -> title={title!r}")
+            continue
+
+        try:
+            tags = ID3(mp3_file)
+        except Exception:
+            tags = ID3()
+
+        tags.delete(mp3_file)
+        tags = ID3()
+
+        tags.add(TIT2(encoding=3, text=title))
+        tags.add(TPE1(encoding=3, text=reciter))
+        tags.add(TPE2(encoding=3, text=reciter))
+        tags.add(TALB(encoding=3, text=album))
+        tags.add(TCON(encoding=3, text="Quran"))
+        tags.add(TCOM(encoding=3, text=reciter))
+        tags.add(TRCK(encoding=3, text=track_num))
+
+        if cover_data:
+            tags.add(
+                APIC(
+                    encoding=3,
+                    mime=mime,
+                    type=3,
+                    desc="Cover",
+                    data=cover_data,
+                )
+            )
+
+        tags.save(mp3_file)
+        print(f"  Tagged: {mp3_file.name} -> {title}")
+
+    print("Done!")
 
 
 def tag_mp3s(
@@ -158,6 +255,10 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview changes without modifying files",
     )
+    parser.add_argument(
+        "--quran-json", type=Path, default=Path("quran.json"),
+        help="Path to quran.json for page-based tagging (default: quran.json)",
+    )
 
     args = parser.parse_args()
 
@@ -167,13 +268,33 @@ def main():
 
     album = args.album or f"Quran - {args.reciter}"
 
-    tag_mp3s(
-        mp3_folder=args.mp3_folder,
-        reciter=args.reciter,
-        cover_path=args.cover,
-        album=album,
-        dry_run=args.dry_run,
-    )
+    # Detect mode: page-based if any page*.mp3 files exist, else surah-based
+    has_page_files = any(args.mp3_folder.glob("page*.mp3"))
+    has_surah_files = any(FILENAME_RE.match(f.name) for f in args.mp3_folder.glob("*.mp3"))
+
+    if has_page_files:
+        tag_page_mp3s(
+            mp3_folder=args.mp3_folder,
+            reciter=args.reciter,
+            cover_path=args.cover,
+            album=album,
+            quran_json_path=args.quran_json,
+            dry_run=args.dry_run,
+        )
+    elif has_surah_files:
+        tag_mp3s(
+            mp3_folder=args.mp3_folder,
+            reciter=args.reciter,
+            cover_path=args.cover,
+            album=album,
+            dry_run=args.dry_run,
+        )
+    else:
+        print(
+            f"Error: no recognized MP3 files in {args.mp3_folder}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
